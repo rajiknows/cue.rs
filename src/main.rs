@@ -1,4 +1,7 @@
-use crate::handlers::{health_check, metrics};
+use crate::{
+    handlers::{enqueue_job_handler, health_check, metrics},
+    state::AppState,
+};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use poem::{
     EndpointExt, Route, Server, get,
@@ -6,16 +9,20 @@ use poem::{
     middleware::{TokioMetrics, Tracing},
     post,
 };
-use tracing_subscriber::{fmt, prelude::*};
+use redis::Client;
+use sqlx::PgPool;
+use tracing_subscriber::fmt;
 
+mod controllers;
 mod handlers;
 mod job;
+mod state;
 
 /// prometheus handle
 static PROMETHEUS_HANDLE: std::sync::OnceLock<PrometheusHandle> = std::sync::OnceLock::new();
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize Prometheus exporter
     let builder = PrometheusBuilder::new();
     let handle = builder
@@ -24,6 +31,17 @@ async fn main() -> std::io::Result<()> {
     PROMETHEUS_HANDLE
         .set(handle)
         .expect("Prometheus handle already set");
+
+    // init redis and sqlx connection
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL required");
+    let redis_url = std::env::var("REDIS_URL").expect("REDIS_URL required");
+
+    let db = PgPool::connect(&db_url).await.unwrap();
+    let redis = Client::open(redis_url).unwrap();
+
+    sqlx::migrate!("./migrations").run(&db).await.unwrap();
+
+    let app_state = AppState { redis, db };
 
     // Initialize tracing
     fmt()
@@ -36,7 +54,8 @@ async fn main() -> std::io::Result<()> {
     let app = Route::new()
         .at("/health", get(health_check))
         .at("/metrics", get(metrics))
-        .at("/job/enqueue", post(post_job))
+        .at("/job/enqueue", post(enqueue_job_handler))
+        .data(app_state)
         .with(Tracing::default())
         .with(TokioMetrics::new());
 
@@ -47,5 +66,7 @@ async fn main() -> std::io::Result<()> {
 
     Server::new(TcpListener::bind("0.0.0.0:3000"))
         .run(app)
-        .await
+        .await;
+
+    Ok(())
 }
