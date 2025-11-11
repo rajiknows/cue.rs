@@ -2,6 +2,7 @@ use crate::{
     handlers::{enqueue_job_handler, health_check, metrics},
     state::AppState,
 };
+use futures::prelude::*;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use poem::{
     EndpointExt, Route, Server, get,
@@ -11,18 +12,21 @@ use poem::{
 };
 use redis::Client;
 use sqlx::PgPool;
+
 use tracing_subscriber::fmt;
 
 mod controllers;
 mod handlers;
 mod job;
 mod state;
+mod worker;
 
 /// prometheus handle
 static PROMETHEUS_HANDLE: std::sync::OnceLock<PrometheusHandle> = std::sync::OnceLock::new();
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
     // Initialize Prometheus exporter
     let builder = PrometheusBuilder::new();
     let handle = builder
@@ -37,11 +41,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let redis_url = std::env::var("REDIS_URL").expect("REDIS_URL required");
 
     let db = PgPool::connect(&db_url).await.unwrap();
-    let redis = Client::open(redis_url).unwrap();
 
+    let client = redis::Client::open(redis_url).unwrap();
+    // let mut con = client.get_multiplexed_async_connection().await?;
     sqlx::migrate!("./migrations").run(&db).await.unwrap();
 
-    let app_state = AppState { redis, db };
+    let app_state = AppState { redis: client, db };
 
     // Initialize tracing
     fmt()

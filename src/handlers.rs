@@ -4,8 +4,9 @@ use poem::{
     Response, Result, handler,
     web::{Data, Json},
 };
+use redis::{AsyncCommands, Commands};
 use reqwest::StatusCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::info;
 use validator::Validate;
@@ -39,20 +40,22 @@ pub async fn metrics() -> String {
     PROMETHEUS_HANDLE.get().unwrap().render()
 }
 
-#[derive(Serialize, Validate)]
+#[derive(Serialize, Deserialize, Validate)]
 #[serde(rename_all = "lowercase")]
 pub struct EnqueueRequest {
     #[validate(length(min = 1, max = 100))]
     pub name: String,
     pub payload: serde_json::Value,
     pub run_at: Option<DateTime<Utc>>,
-    pub priority: Option<u16>,
+    pub priority: Option<i16>,
+    #[validate(length(min = 1, max = 255))]
+    pub idempotency_key: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct EnqueueResponse {
     job_id: uuid::Uuid,
-    status: String,
+    status: JobStatus,
 }
 
 #[handler]
@@ -67,14 +70,25 @@ pub async fn enqueue_job_handler(
         .await
         .map_err(|e| poem::Error::from_string(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
 
-    // 3. Notify workers via Redis (fire-and-forget)
-    if let Ok(mut conn) = state.redis.get_connection().await {
-        let _ = conn.publish("job:available", job_id.to_string()).await;
+    if let Ok(mut conn) = state.redis.get_multiplexed_async_connection().await {
+        if let Err(e) = conn
+            .publish::<_, _, ()>("job:available", job_id.to_string())
+            .await
+        {
+            tracing::warn!("Redis publish failed: {}", e);
+        }
     }
 
-    // 4. Respond
     Ok(Json(EnqueueResponse {
         job_id,
-        status: "pending".to_string(),
+        status: JobStatus::Pending,
     }))
+}
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum JobStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
 }

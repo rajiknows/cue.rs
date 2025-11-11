@@ -1,4 +1,5 @@
 use chrono::Utc;
+use poem::web::Json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -29,12 +30,12 @@ pub async fn enqueue_job(pool: &PgPool, req: &EnqueueRequest) -> Result<Uuid, En
         RETURNING id
         "#,
         job_id,
-        &req.name,
-        Json(&req.payload) as _,
-        priority,
+        req.name,
+        &req.payload,
+        priority as i16,
         status,
         run_at,
-        &req.idempotency_key
+        req.idempotency_key
     )
     .fetch_one(pool)
     .await?;
